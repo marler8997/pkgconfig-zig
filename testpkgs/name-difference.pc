@@ -1,0 +1,3 @@
+Name: a-different-name
+Description: A package with a different name from it's filename.
+Version: 4.5.6

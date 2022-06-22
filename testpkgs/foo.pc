@@ -1,0 +1,11 @@
+prefix=/usr
+libdir=${prefix}/lib
+includedir=${prefix}/include
+version_major=1
+version=${version_major}.2.3
+
+Name: foo
+Description: The foo package
+Version: 1.2.3
+Libs: -L${libdir}/foo-${version} -lfoo${version_major} --other-linker-flag
+Cflags: -I${includedir}/foo-${version} -Dlibfoo_linux

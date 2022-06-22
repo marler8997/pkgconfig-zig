@@ -1,0 +1,3 @@
+Name: foo
+Description: The foo package
+Version: 1.2.3
