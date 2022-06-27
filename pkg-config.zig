@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const version = "0.29.1";
+const pkgconfig_version = "0.29.1";
 
 pub const log_level: std.log.Level = .warn;
 
@@ -31,10 +31,12 @@ const MainOp = union(enum) {
     exists: void,
     modversion: void,
     variable: []const u8,
-    flags: struct {
+    flags: Flags,
+
+    pub const Flags = struct {
         first_opt: []const u8,
         bits: Flag.Bits,
-    },
+    };
     pub fn getOptionString(self: MainOp) []const u8 {
         return switch (self) {
             .exists => "--exists",
@@ -46,10 +48,18 @@ const MainOp = union(enum) {
 
     pub const State = union(enum) {
         none: void,
-        args: struct {
+        args: Args,
+
+        pub const Args = struct {
             arena: std.heap.ArenaAllocator,
             cflags: std.ArrayListUnmanaged([]const u8) = .{},
             libs: std.ArrayListUnmanaged([]const u8) = .{},
+            pkgs_done: std.StringHashMapUnmanaged([]const u8) = .{},
+            pub fn addPkg(self: *@This(), name: []const u8, version: []const u8) void {
+                const new_name = self.arena.allocator().dupe(u8, name) catch |e| oom(e);
+                const new_version = self.arena.allocator().dupe(u8, version) catch |e| oom(e);
+                self.pkgs_done.put(self.arena.allocator(), new_name, new_version) catch |e| oom(e);
+            }
             pub fn addCflag(self: *@This(), cflag: []const u8) void {
                 // todo: check if this library is a system path that would
                 //       already be added
@@ -96,7 +106,14 @@ const MainOp = union(enum) {
                 try buffered.writer().writeAll("\n");
                 try buffered.flush();
             }
-        },
+        };
+
+        pub fn asArgs(self: *State) *Args {
+            return switch (self.*) {
+                .none => unreachable,
+                .args => |*args| return args,
+            };
+        }
         pub fn addCflag(self: *State, cflag: []const u8) void {
             switch (self.*) {
                 .none => unreachable,
@@ -174,7 +191,7 @@ pub fn main() !u8 {
                 pkg_arg_ptr[pkg_arg_count] = arg;
                 pkg_arg_count += 1;
             } else if (std.mem.eql(u8, "--version", arg)) {
-                try stdout.writeAll(version ++ "\n");
+                try stdout.writeAll(pkgconfig_version ++ "\n");
                 return 0;
             } else if (std.mem.eql(u8, "--print-errors", arg)) {
                 options.print_errors = true;
@@ -222,18 +239,7 @@ pub fn main() !u8 {
         return 1;
     }
     while (pkgs_str_it.next()) |pkg_name| {
-        var pkg = Pkg{ .name = pkg_name, .version_req = null };
-        if (pkgs_str_it.peek()) |next_str| {
-            if (compare_op_map.get(next_str)) |op| {
-                pkgs_str_it.popAssertPeeked();
-                const version_str = pkgs_str_it.next() orelse {
-                    // TODO: use provider and move this somewhere common
-                    try stderr.print("Package specifier '{s} {s}' provided on command line is missing version", .{pkg_name, next_str});
-                    std.os.exit(1);
-                };
-                pkg.version_req = .{ .op = op, .str = version_str };
-            }
-        }
+        const pkg = try nextPackage(.command_line, &pkgs_str_it, pkg_name);
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         switch (try handlePackage(arena.allocator(), main_op, &main_op_state, pkg)) {
@@ -257,6 +263,21 @@ pub fn main() !u8 {
             return 0;
         }
     }
+}
+
+fn nextPackage(provider: PkgProvider, pkgs_str_it: *Peekable(std.mem.TokenIterator(u8)), pkg_name: []const u8) !Pkg {
+    if (pkgs_str_it.peek()) |next_str| {
+        if (compare_op_map.get(next_str)) |op| {
+            pkgs_str_it.popAssertPeeked();
+            const version_str = pkgs_str_it.next() orelse {
+                // TODO: use provider and move this somewhere common
+                try stderr.print("Package specifier '{s} {s}' {} is missing version", .{pkg_name, next_str, provider});
+                std.os.exit(1);
+            };
+            return Pkg{ .name = pkg_name, .version_req = .{ .op = op, .str = version_str } };
+        }
+    }
+    return Pkg{ .name = pkg_name, .version_req = null };
 }
 
 // TODO: maybe candidate for std library
@@ -400,6 +421,7 @@ test {
     try testCompare(.left_greater, "1.2", "1.1");
     try testCompare(.left_greater, "1.23", "1.9");
     try testCompare(.left_greater, "a.8", "a.7");
+    try testCompare(.left_greater, "8.45", "8.31");
 }
 
 const PkgProvider = union(enum) {
@@ -469,12 +491,14 @@ const compare_op_map = std.ComptimeStringMap(CompareOp, .{
     .{ ">=", .ge },
 });
 
+const HandlePackageResult = enum { ok, non_zero_exit };
+
 fn handlePackage(
     allocator: std.mem.Allocator,
     main_op: MainOp,
     main_op_state: *MainOp.State,
     pkg: Pkg,
-) !enum { ok, non_zero_exit } {
+) !HandlePackageResult {
     var pc_path_buf: [path_buf_len]u8 = undefined;
     const opt_pc_path: ?[:0]u8 = if (findPackage(&pc_path_buf, pkg.name)) |pc_path_len|
         pc_path_buf[0..pc_path_len :0] else null;
@@ -602,6 +626,7 @@ fn handlePackage(
                         try informIncompatibleVersion(pkg, sub.value);
                         std.os.exit(1);
                     }
+                    main_op_state.asArgs().addPkg(pkg.name, sub.value);
                     got_version = true;
                 } else if (std.mem.eql(u8, line.keyword, "Cflags")) {
                     raw_fields.cflags = line.raw_value;
@@ -621,7 +646,11 @@ fn handlePackage(
                 std.os.exit(1);
             }
 
+            var include_requires = false;
+            var include_requires_private = false;
             if (0 != (flags.bits & Flag.cflags_all_mask)) {
+                include_requires = true;
+                include_requires_private = true;
                 if (raw_fields.cflags) |cflags| {
                     const sub = try stringSub(allocator, pc_path, &parser.var_map, cflags);
                     defer sub.deinit(allocator);
@@ -635,14 +664,12 @@ fn handlePackage(
                         }
                     }
                 }
-                if (raw_fields.requires) |_| {
-                    std.debug.panic("handle Requires in {s}: '{s}'", .{pc_path, raw_fields.requires});
-                }
-                if (raw_fields.requires_private) |_| {
-                    @panic("TODO: handle Requires");
-                }
             }
             if (0 != (flags.bits & Flag.libs_all_mask)) {
+                include_requires = true;
+                if (0 != (flags.bits & Flag.static.bit())) {
+                    include_requires_private = true;
+                }
                 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                 // TODO: filter out system library directories, (i.e. -L/usr/lib)
                 if (raw_fields.libs) |libs| {
@@ -658,24 +685,58 @@ fn handlePackage(
                         }
                     }
                 }
-                if (raw_fields.libs_private) |_| {
-                    @panic("TODO: handle Libs.private");
-                }
-                if (raw_fields.requires) |_| {
-                    @panic("TODO: handle Requires");
-                }
-                if ((0 != (flags.bits & Flag.static.bit()))) {
-                    if (raw_fields.requires_private) |_| {
-                        @panic("TODO: handle --static and Requires.private");
+            }
+            if (include_requires) {
+                if (raw_fields.requires) |requires| {
+                    const sub = try stringSub(allocator, pc_path, &parser.var_map, requires);
+                    defer sub.deinit(allocator);
+                    switch (try handleFlagsOpRequires(allocator, main_op, main_op_state, pc_path, sub.value)) {
+                        .ok => {},
+                        .non_zero_exit => return .non_zero_exit,
                     }
                 }
             }
-            if (0 != (flags.bits & Flag.static.bit())) {
-                @panic("TODO: handle --static");
+            if (include_requires_private) {
+                if (raw_fields.requires_private) |requires| {
+                    const sub = try stringSub(allocator, pc_path, &parser.var_map, requires);
+                    defer sub.deinit(allocator);
+                    switch (try handleFlagsOpRequires(allocator, main_op, main_op_state, pc_path, sub.value)) {
+                        .ok => {},
+                        .non_zero_exit => return .non_zero_exit,
+                    }
+                }
             }
             return .ok;
         },
     }
+}
+
+fn handleFlagsOpRequires(
+    allocator: std.mem.Allocator,
+    main_op: MainOp,
+    main_op_state: *MainOp.State,
+    pc_path: []const u8,
+    requires: []const u8,
+) anyerror!HandlePackageResult {
+    const ignore = whitespace_no_newline ++ [_]u8 { ',' };
+    var pkgs_str_it = peekable(std.mem.tokenize(u8, requires, &ignore));
+    if (pkgs_str_it.peek() == null)
+        return .ok;
+    var result = HandlePackageResult.ok;
+    while (pkgs_str_it.next()) |pkg_name| {
+        const pkg = try nextPackage(.{ .required_by = .{ .pc_file = pc_path }}, &pkgs_str_it, pkg_name);
+        if (main_op_state.asArgs().pkgs_done.get(pkg_name)) |version| {
+            if (!pkg.versionCompatibleWith(version)) {
+                try informIncompatibleVersion(pkg, version);
+                std.os.exit(1);
+            }
+        }
+        switch (try handlePackage(allocator, main_op, main_op_state, pkg)) {
+            .ok => {},
+            .non_zero_exit => result = .non_zero_exit,
+        }
+    }
+    return result;
 }
 
 const LibFlagType = enum {

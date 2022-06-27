@@ -1,0 +1,12 @@
+prefix=/usr
+libdir=${prefix}/lib
+includedir=${prefix}/include
+version_major=73
+version=${version_major}.921
+
+Name: bar
+Description: The bar package, depends on foo
+Version: 800.4.2
+Requires: foo >= 1.1.0
+Libs: -L${libdir}/bar-${version} -lbar${version_major} --other-linker-flag
+Cflags: -I${includedir}/bar-${version} -Dlibbar_linux

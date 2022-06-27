@@ -96,7 +96,7 @@ const test_cases = [_]TestCase{
     goodCase("1.2.3\n", "", &.{"--modversion", "foo"}, .{}),
     goodCase("1.2.3\n", "", &.{"--modversion", "foo = 1.2.3"}, .{}),
     goodCase("1.2.3\n", "", &.{"--modversion", "foo", "=", "1.2.3"}, .{}),
-    failCase("", "Package specifier 'foo =' provided on command line is missing version", &.{"--modversion", "foo", "="}, .{}),
+    failCase("", "Package specifier 'foo =' provided on the command-line is missing version", &.{"--modversion", "foo", "="}, .{}),
     failCase("", "Requested 'foo = 1.2.4' but version of foo is 1.2.3\n", &.{"--modversion", "foo = 1.2.4"}, .{}),
     goodCase("1.2.3\n", "", &.{"--modversion", "foo < 1.2.4"}, .{}),
     failCase("", "Requested 'foo < 1.2.3' but version of foo is 1.2.3\n", &.{"--modversion", "foo < 1.2.3"}, .{}),
@@ -128,4 +128,8 @@ const test_cases = [_]TestCase{
     goodCase("-L/usr/lib/foo-1.2.3\n", "", &.{"--libs-only-L", "foo"}, .{}),
     goodCase("-lfoo1\n", "", &.{"--libs-only-l", "foo"}, .{}),
     goodCase("--other-linker-flag\n", "", &.{"--libs-only-other", "foo"}, .{}),
+
+    goodCase("-I/usr/include/bar-73.921 -Dlibbar_linux -I/usr/include/foo-1.2.3 -Dlibfoo_linux\n", "", &.{"--cflags", "bar"}, .{}),
+    failCase("", "Requested 'foo > 1.2.3' but version of foo is 1.2.3\n", &.{"--cflags", "bar-needs-newer-foo"}, .{}),
+    failCase("", "Requested 'foo > 1.2.3' but version of foo is 1.2.3\n", &.{"--cflags", "bar-needs-bar-newer-foo"}, .{}),
 };
