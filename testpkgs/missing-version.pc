@@ -1,1 +1,4 @@
+foo=bar
 Name: missing-version
+# it looks like pkg-config treats a missing version field as an error
+Cflags: -DMISSING_VERSION_CFLAGS

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 
 const version = "0.29.1";
 
@@ -206,23 +207,33 @@ pub fn main() !u8 {
         }
     }
 
-    if (pkg_arg_count == 0) {
-        try stdout.writeAll("Must specify package names on the command line\n");
-        return 1;
-    }
-    const pkgs_slice = pkg_arg_ptr[0 .. pkg_arg_count];
+    const pkg_cmdline_args = pkg_arg_ptr[0 .. pkg_arg_count];
 
     const main_op = options.main_op orelse .exists;
     var main_op_state = main_op.initState();
     var exit_code: u8 = 0;
 
-    for (pkgs_slice) |pkg_ptr| {
-        const pkg = std.mem.span(pkg_ptr);
-
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // TODO: handle if pkg contains a version check (i.e. foo >= 2.7)
-        std.log.info("TODO: handle '{s}'", .{pkg});
-
+    // TODO: maybe we should implement some logic to avoid this allocation
+    //       we will need to support parsing packages from a single string though when we parse the Requires field
+    var pkgs_str = joinSentinelStrings(std.heap.page_allocator, " ", pkg_cmdline_args) catch |e| oom(e);
+    var pkgs_str_it = peekable(std.mem.tokenize(u8, pkgs_str, &whitespace_no_newline));
+    if (pkgs_str_it.peek() == null) {
+        try stdout.writeAll("Must specify package names on the command line\n");
+        return 1;
+    }
+    while (pkgs_str_it.next()) |pkg_name| {
+        var pkg = Pkg{ .name = pkg_name, .version_req = null };
+        if (pkgs_str_it.peek()) |next_str| {
+            if (compare_op_map.get(next_str)) |op| {
+                pkgs_str_it.popAssertPeeked();
+                const version_str = pkgs_str_it.next() orelse {
+                    // TODO: use provider and move this somewhere common
+                    try stderr.print("Package specifier '{s} {s}' provided on command line is missing version", .{pkg_name, next_str});
+                    std.os.exit(1);
+                };
+                pkg.version_req = .{ .op = op, .str = version_str };
+            }
+        }
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         switch (try handlePackage(arena.allocator(), main_op, &main_op_state, pkg)) {
@@ -248,14 +259,224 @@ pub fn main() !u8 {
     }
 }
 
+// TODO: maybe candidate for std library
+// WORKAROUND compiler bug, unable to make strings type `[]const [*:0]const u8`, results in:
+//     broken LLVM module found: Call parameter type does not match function signature!
+//       %pkg_cmdline_args = alloca %"[][*:0]u8", align 8
+//      %"[][*:0]const u8"*  call fastcc void @joinSentinelStrings({ %"[]u8", i16 }* sret({ %"[]u8", i16 }) %25, %std.builtin.StackTrace* %1, %std.mem.Allocator* @376, %"[]u8"* @378, %"[][*:0]u8"* %pkg_cmdline_args), !dbg !15274
+fn joinSentinelStrings(allocator: std.mem.Allocator, separator: []const u8, strings: []const [*:0]u8) error{OutOfMemory}![]u8 {
+    if (strings.len == 0) return &[0]u8{};
+    const total_len = blk: {
+        var sum: usize = separator.len * (strings.len - 1);
+        for (strings) |str| sum += std.mem.len(str);
+        break :blk sum;
+    };
+    const buf = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(buf);
+    const first_str_len = std.mem.len(strings[0]);
+    std.mem.copy(u8, buf, strings[0][0..first_str_len]);
+    var buf_index: usize = first_str_len;
+    for (strings[1..]) |str| {
+        std.mem.copy(u8, buf[buf_index..], separator);
+        buf_index += separator.len;
+        const str_len = std.mem.len(str);
+        std.mem.copy(u8, buf[buf_index..], str[0..str_len]);
+        buf_index += str_len;
+    }
+    return buf;
+}
+
+// TODO: maybe good candidate for std library?
+fn Peekable(comptime Iterator: type) type {
+    const T = @typeInfo(@typeInfo(@TypeOf(Iterator.next)).Fn.return_type.?).Optional.child;
+    return struct {
+        iterator: Iterator,
+        peeked: ?T = null,
+
+        const Self = @This();
+
+        pub fn peek(self: *Self) ?T {
+            if (self.peeked) |val| return val;
+            self.peeked = self.iterator.next();
+            return self.peeked;
+        }
+
+        pub fn popAssertPeeked(self: *Self) void {
+            std.debug.assert(self.peeked != null);
+            self.peeked = null;
+        }
+
+        pub fn next(self: *Self) ?T {
+            if (self.peeked) |val| {
+                self.peeked = null;
+                return val;
+            }
+            return self.iterator.next();
+        }
+    };
+}
+fn peekable(it: anytype) Peekable(@TypeOf(it)) {
+    return Peekable(@TypeOf(it)) { .iterator = it };
+}
+
+const Pkg = struct {
+    name: []const u8,
+    version_req: ?VersionRequirement,
+    pub fn versionCompatibleWith(self: Pkg, actual_version: []const u8) bool {
+        return if (self.version_req) |v| v.compatibleWith(actual_version) else true;
+    }
+};
+const VersionRequirement = struct {
+    op: CompareOp,
+    str: []const u8,
+    pub fn compatibleWith(self: VersionRequirement, actual_version: []const u8) bool {
+        switch (compareVersionStrings(actual_version, self.str)) {
+            .equal => return self.op.includesEquality(),
+            .left_longer,
+            .right_longer,
+            => {
+                std.log.warn("unsure how to compare versions '{s}' and '{s}'", .{actual_version, self.str});
+                return false;
+            },
+            .incomparable => {
+                std.log.warn("can't compare versions '{s}' and '{s}'", .{actual_version, self.str});
+                return false;
+            },
+            .left_greater => return self.op.includesGreaterThan(),
+            .right_greater => return self.op.includesLessThan(),
+        }
+    }
+};
+
+const CompareResult = enum {
+    equal,
+    left_longer,
+    right_longer,
+    incomparable,
+    left_greater,
+    right_greater,
+    pub fn swap(self: CompareResult) CompareResult {
+        return switch (self) {
+            .equal => .equal,
+            .left_longer => .right_longer,
+            .right_longer => .left_longer,
+            .incomparable => .incomparable,
+            .left_greater => .right_greater,
+            .right_greater => .left_greater,
+        };
+    }
+};
+fn compareVersionStrings(left: []const u8, right: []const u8) CompareResult {
+    var left_it = std.mem.split(u8, left, ".");
+    var right_it = std.mem.split(u8, right, ".");
+    var left_next = left_it.next().?;
+    var right_next = right_it.next().?;
+    while (true) {
+        if (!std.mem.eql(u8, left_next, right_next)) {
+            const left_num = std.fmt.parseInt(u32, left_next, 10) catch return .incomparable;
+            const right_num = std.fmt.parseInt(u32, right_next, 10) catch return .incomparable;
+            if (left_num > right_num) return .left_greater;
+            if (right_num > left_num) return .right_greater;
+        }
+        left_next = left_it.next() orelse {
+            if (right_it.next()) |_| return .right_longer;
+            return .equal;
+        };
+        right_next = right_it.next() orelse return .left_longer;
+    }
+}
+
+fn testCompare(expected: CompareResult, left: []const u8, right: []const u8) !void {
+    try testing.expectEqual(expected, compareVersionStrings(left, right));
+    try testing.expectEqual(expected.swap(), compareVersionStrings(right, left));
+}
+test {
+    try testCompare(.equal, "", "");
+    try testCompare(.equal, "a", "a");
+    try testCompare(.left_longer, ".b", "");
+    try testCompare(.left_longer, "a.b", "a");
+    try testCompare(.incomparable, "0", "a");
+    try testCompare(.left_greater, "1", "0");
+    try testCompare(.left_greater, "1.2", "1.1");
+    try testCompare(.left_greater, "1.23", "1.9");
+    try testCompare(.left_greater, "a.8", "a.7");
+}
+
+const PkgProvider = union(enum) {
+    command_line: void,
+    required_by: struct {
+        pc_file: []const u8,
+    },
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            .command_line => try writer.writeAll("provided on the command-line"),
+            .required_by => |by| try writer.print("required by '{s}'", .{ by.pc_file }),
+        }
+    }
+};
+
+const CompareOp = enum {
+    eq, lt, gt, le, ge,
+    pub fn str(self: CompareOp) []const u8 {
+        return switch (self) {
+            .eq => "=",
+            .lt => "<",
+            .gt => ">",
+            .le => "<=",
+            .ge => ">=",
+        };
+    }
+    pub fn includesEquality(self: CompareOp) bool {
+        return switch (self) {
+            .eq => true,
+            .lt => false,
+            .gt => false,
+            .le => true,
+            .ge => true,
+        };
+    }
+    pub fn includesLessThan(self: CompareOp) bool {
+        return switch (self) {
+            .eq => false,
+            .lt => true,
+            .gt => false,
+            .le => true,
+            .ge => false,
+        };
+    }
+    pub fn includesGreaterThan(self: CompareOp) bool {
+        return switch (self) {
+            .eq => false,
+            .lt => false,
+            .gt => true,
+            .le => false,
+            .ge => true,
+        };
+    }
+};
+const compare_op_map = std.ComptimeStringMap(CompareOp, .{
+    .{ "=", .eq },
+    .{ "<", .lt },
+    .{ ">", .gt },
+    .{ "<=", .le },
+    .{ ">=", .ge },
+});
+
 fn handlePackage(
     allocator: std.mem.Allocator,
     main_op: MainOp,
     main_op_state: *MainOp.State,
-    pkg: []const u8,
+    pkg: Pkg,
 ) !enum { ok, non_zero_exit } {
     var pc_path_buf: [path_buf_len]u8 = undefined;
-    const opt_pc_path: ?[:0]u8 = if (findPackage(&pc_path_buf, pkg)) |pc_path_len|
+    const opt_pc_path: ?[:0]u8 = if (findPackage(&pc_path_buf, pkg.name)) |pc_path_len|
         pc_path_buf[0..pc_path_len :0] else null;
     if (opt_pc_path) |pc_path| {
         std.log.debug("found package '{s}' at '{s}'", .{pkg, pc_path});
@@ -264,12 +485,34 @@ fn handlePackage(
     }
     switch (main_op) {
         .exists => {
-            if (opt_pc_path == null) return std.os.exit(1);
-            return .ok;
+            const pc_path = opt_pc_path orelse std.os.exit(1);
+            const version_req = pkg.version_req orelse return .ok;
+            var parser = Parser {
+                .allocator = allocator,
+                .content = try readFile(allocator, pc_path),
+            };
+            defer parser.deinit();
+            while (parser.next()) |line| {
+                if (std.mem.eql(u8, line.keyword, "Version")) {
+                    const sub = try stringSub(allocator, pc_path, &parser.var_map, line.raw_value);
+                    defer sub.deinit(allocator);
+                    if (version_req.compatibleWith(sub.value)) {
+                        return .ok;
+                    }
+                    // looks like original pkg-config may not print a message in this case
+                    //try informIncompatibleVersion(pkg, sub.value);
+                    std.os.exit(1);
+                }
+            }
+            // no version was specified, original pkg-config doesn't inform user of this
+            // error to stderr in this case but this seems like it should be reported since it's
+            // an error in the .pc file rather than a non-existent .pc file
+            try informMissingVersion(pkg.name);
+            std.os.exit(1);
         },
         .modversion => {
             const pc_path = opt_pc_path orelse {
-                try informMissingPackage(pkg);
+                try informMissingPackage(pkg.name);
                 return .non_zero_exit;
             };
             var parser = Parser {
@@ -281,17 +524,20 @@ fn handlePackage(
                 if (std.mem.eql(u8, line.keyword, "Version")) {
                     const sub = try stringSub(allocator, pc_path, &parser.var_map, line.raw_value);
                     defer sub.deinit(allocator);
-                    try stdout.print("{s}\n", .{sub.value});
-                    return .ok;
+                    if (pkg.versionCompatibleWith(sub.value)) {
+                        try stdout.print("{s}\n", .{sub.value});
+                        return .ok;
+                    }
+                    try informIncompatibleVersion(pkg, sub.value);
+                    std.os.exit(1);
                 }
             }
-
-            try stderr.print("Package '{s}' has no Version: field\n", .{pkg});
-            return .non_zero_exit;
+            try informMissingVersion(pkg.name);
+            std.os.exit(1);
         },
         .variable => |name| {
             const pc_path = opt_pc_path orelse {
-                try informMissingPackage(pkg);
+                try informMissingPackage(pkg.name);
                 return .non_zero_exit;
             };
             var parser = Parser {
@@ -299,7 +545,24 @@ fn handlePackage(
                 .content = try readFile(allocator, pc_path),
             };
             defer parser.deinit();
-            while (parser.next()) |_| {}
+            var got_version = false;
+            while (parser.next()) |line| {
+                if (std.mem.eql(u8, line.keyword, "Version")) {
+                    const sub = try stringSub(allocator, pc_path, &parser.var_map, line.raw_value);
+                    defer sub.deinit(allocator);
+                    if (!pkg.versionCompatibleWith(sub.value)) {
+                        try informIncompatibleVersion(pkg, sub.value);
+                        std.os.exit(1);
+                    }
+                    got_version = true;
+                }
+            }
+
+            if (!got_version) {
+                try informMissingVersion(pkg.name);
+                std.os.exit(1);
+            }
+
             // missing variable is apparently fine
             const raw_value = parser.var_map.getRaw(name) orelse "";
             const sub = try stringSub(allocator, pc_path, &parser.var_map, raw_value);
@@ -313,7 +576,7 @@ fn handlePackage(
         },
         .flags => |flags| {
             const pc_path = opt_pc_path orelse {
-                try informMissingPackage(pkg);
+                try informMissingPackage(pkg.name);
                 return .non_zero_exit;
             };
             var parser = Parser {
@@ -321,7 +584,9 @@ fn handlePackage(
                 .content = try readFile(allocator, pc_path),
             };
             defer parser.deinit();
+            var got_version = false;
             var raw_fields: struct {
+                got_version: bool = false,
                 cflags: ?[]const u8 = null,
                 libs: ?[]const u8 = null,
                 libs_private: ?[]const u8 = null,
@@ -330,7 +595,15 @@ fn handlePackage(
                 requires_private: ?[]const u8 = null,
             } = .{};
             while (parser.next()) |line| {
-                if (std.mem.eql(u8, line.keyword, "Cflags")) {
+                if (std.mem.eql(u8, line.keyword, "Version")) {
+                    const sub = try stringSub(allocator, pc_path, &parser.var_map, line.raw_value);
+                    defer sub.deinit(allocator);
+                    if (!pkg.versionCompatibleWith(sub.value)) {
+                        try informIncompatibleVersion(pkg, sub.value);
+                        std.os.exit(1);
+                    }
+                    got_version = true;
+                } else if (std.mem.eql(u8, line.keyword, "Cflags")) {
                     raw_fields.cflags = line.raw_value;
                 } else if (std.mem.eql(u8, line.keyword, "Libs")) {
                     raw_fields.libs = line.raw_value;
@@ -341,6 +614,11 @@ fn handlePackage(
                 } else if (std.mem.eql(u8, line.keyword, "Requires.private")) {
                     raw_fields.requires_private = line.raw_value;
                 }
+            }
+
+            if (!got_version) {
+                try informMissingVersion(pkg.name);
+                std.os.exit(1);
             }
 
             if (0 != (flags.bits & Flag.cflags_all_mask)) {
@@ -469,6 +747,14 @@ fn findPackageWithPath(out_path: *[path_buf_len]u8, name: []const u8, path: []co
     return null;
 }
 
+fn informMissingVersion(pkg: []const u8) !void {
+    try stderr.print("Package '{s}' has no Version: field\n", .{pkg});
+}
+fn informIncompatibleVersion(requested_pkg: Pkg, actual_version: []const u8) !void {
+    std.debug.assert(requested_pkg.version_req != null);
+    try stderr.print("Requested '{s} {s} {s}' but version of {0s} is {s}\n", .{
+        requested_pkg.name, requested_pkg.version_req.?.op.str(), requested_pkg.version_req.?.str, actual_version});
+}
 fn fatalInformMissingVariable(pc_filename: []const u8, name: []const u8) noreturn {
     stderr.print("Variable '{s}' not defined in '{s}'\n", .{name, pc_filename}) catch |err| {
         std.debug.panic("write to stderr to inform user of missing variable name '{s}' failed because of '{s}'", .{name, @errorName(err)});
@@ -537,9 +823,7 @@ const Parser = struct {
     };
     pub fn next(self: *Parser) ?Line {
         while (true) {
-            std.log.info("next offset={}", .{self.next_offset});
             const offset = scanWhitespace(self.content, self.next_offset);
-            std.log.info("    next offset={}", .{offset});
             if (offset >= self.content.len) return null;
 
             const line_start = offset;
@@ -587,7 +871,8 @@ fn removeInlineComment(line: []const u8) []const u8 {
     return line[0 .. hash_index];
 }
 
-const whitespace = [_]u8 { ' ', '\n', '\t', '\r' };
+const whitespace_no_newline = [_]u8 { ' ', '\t' };
+const whitespace = whitespace_no_newline ++ [_]u8 { '\n', '\r' };
 
 fn isWhitespace(c: u8) bool {
     inline for (whitespace) |ws| {

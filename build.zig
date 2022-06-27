@@ -78,6 +78,7 @@ fn goodCase(expect_stdout: []const u8, expect_stderr: []const u8, args: []const 
 
 const test_cases = [_]TestCase{
     failCase("Must specify package names on the command line\n", "", &.{}, .{}),
+    failCase("Must specify package names on the command line\n", "", &.{"  \t  ", "\t\t  \t"}, .{}),
     goodCase("0.29.1\n", "", &.{"--version"}, .{}),
     failCase("Unknown option --badoption\n", "", &.{"--badoption"}, .{}),
     goodCase("", "", &.{"--exists", "this-is-a-specific-test-pkg"}, .{}),
@@ -87,8 +88,29 @@ const test_cases = [_]TestCase{
     failCase("", "error: '--modversion' is incompatible with '--exists'\n",
              &.{"--exists", "--modversion", "this-is-a-specific-test-pkg"}, .{}),
     failCase("", "No package 'blah' found\n", &.{"--modversion", "blah"}, .{}),
+
+
+    goodCase("", "", &.{"--exists", "foo = 1.2.3"}, .{}),
+    failCase("", "", &.{"--exists", "foo = 1.2.4"}, .{}),
+
     goodCase("1.2.3\n", "", &.{"--modversion", "foo"}, .{}),
+    goodCase("1.2.3\n", "", &.{"--modversion", "foo = 1.2.3"}, .{}),
+    goodCase("1.2.3\n", "", &.{"--modversion", "foo", "=", "1.2.3"}, .{}),
+    failCase("", "Package specifier 'foo =' provided on command line is missing version", &.{"--modversion", "foo", "="}, .{}),
+    failCase("", "Requested 'foo = 1.2.4' but version of foo is 1.2.3\n", &.{"--modversion", "foo = 1.2.4"}, .{}),
+    goodCase("1.2.3\n", "", &.{"--modversion", "foo < 1.2.4"}, .{}),
+    failCase("", "Requested 'foo < 1.2.3' but version of foo is 1.2.3\n", &.{"--modversion", "foo < 1.2.3"}, .{}),
+    goodCase("1.2.3\n", "", &.{"--modversion", "foo > 1.2.2"}, .{}),
+    failCase("", "Requested 'foo > 1.2.3' but version of foo is 1.2.3\n", &.{"--modversion", "foo > 1.2.3"}, .{}),
+    goodCase("1.2.3\n", "", &.{"--modversion", "foo <= 1.2.3"}, .{}),
+    failCase("", "Requested 'foo <= 1.2.2' but version of foo is 1.2.3\n", &.{"--modversion", "foo <= 1.2.2"}, .{}),
+    goodCase("1.2.3\n", "", &.{"--modversion", "foo >= 1.2.3"}, .{}),
+    failCase("", "Requested 'foo >= 1.2.4' but version of foo is 1.2.3\n", &.{"--modversion", "foo >= 1.2.4"}, .{}),
+
     failCase("", "Package 'missing-version' has no Version: field\n", &.{"--modversion", "missing-version"}, .{}),
+    //failCase("", "Package 'missing-version' has no Version: field\n", &.{"--validate", "missing-version"}, .{}),
+    failCase("", "Package 'missing-version' has no Version: field\n", &.{"--variable=foo", "missing-version"}, .{}),    
+    failCase("", "Package 'missing-version' has no Version: field\n", &.{"--cflags", "missing-version"}, .{}),
 
     goodCase("/usr\n", "", &.{"--variable=prefix", "some-vars"}, .{}),
     goodCase("\n", "", &.{"--variable=this_var_does_not_exist", "some-vars"}, .{}),

@@ -1,5 +1,6 @@
 prefix=/usr
 exec_prefix=${prefix}
+includedir=${prefix}/include
 libdir=${exec_prefix}/lib
 sysconfdir=/etc
 var_with_spaces=foo bar baz
@@ -7,3 +8,4 @@ var_with_spaces=foo bar baz
 Name: some-vars
 Description: A pkg-config example file with some variables
 Version: 1.4.1
+Cflags: -I${includedir}/some-vars
