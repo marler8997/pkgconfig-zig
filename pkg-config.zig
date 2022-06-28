@@ -90,17 +90,17 @@ const MainOp = union(enum) {
                 errdefer self.arena.free(lib_copy);
                 self.libs.append(self.arena.allocator(), lib_copy) catch |e| oom(e);
             }
-            pub fn printFlags(self: @This()) !void {
+            pub fn printFlags(self: @This(), opt_sysroot: ?[]const u8) !void {
                 var buffered = std.io.BufferedWriter(std.mem.page_size, @TypeOf(stdout)) {
                     .unbuffered_writer = stdout,
                 };
                 var prefix: []const u8 = "";
                 for (self.cflags.items) |arg| {
-                    try buffered.writer().print("{s}{s}", .{prefix, arg});
+                    try buffered.writer().print("{s}{s}", .{prefix, fmtCflag(arg, opt_sysroot)});
                     prefix = " ";
                 }
                 for (self.libs.items) |arg| {
-                    try buffered.writer().print("{s}{s}", .{prefix, arg});
+                    try buffered.writer().print("{s}{s}", .{prefix, fmtLib(arg, opt_sysroot)});
                     prefix = " ";
                 }
                 try buffered.writer().writeAll("\n");
@@ -126,10 +126,10 @@ const MainOp = union(enum) {
                 .args => |*args| args.addLib(lib),
             }
         }
-        pub fn printFlags(self: State) !void {
+        pub fn printFlags(self: State, opt_sysroot: ?[]const u8) !void {
             switch (self) {
                 .none => unreachable,
-                .args => |args| try args.printFlags(),
+                .args => |args| try args.printFlags(opt_sysroot),
             }
         }
     };
@@ -259,7 +259,7 @@ pub fn main() !u8 {
         // TODO: not sure if this is correct in the .flags case
         .flags => {
             if (exit_code != 0) return exit_code;
-            try main_op_state.printFlags();
+            try main_op_state.printFlags(std.os.getenv("PKG_CONFIG_SYSROOT_DIR"));
             return 0;
         }
     }
@@ -1006,4 +1006,58 @@ fn stringSub(
             std.os.exit(0xff);
         }
     }
+}
+
+const FmtCflag = struct {
+    cflag: []const u8,
+    opt_sysroot: ?[]const u8,
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = fmt;
+        _ = options;
+        if (self.opt_sysroot) |sysroot| {
+            if (std.mem.startsWith(u8, self.cflag, "-I")) {
+                const path = self.cflag[2..];
+                if (!std.mem.startsWith(u8, path, "/"))
+                    std.debug.panic("TODO: handle cflag -I where the next character is not '/': '{s}'", .{self.cflag});
+                try writer.print("-I{s}{s}", .{sysroot, path});
+                return;
+            }
+        }
+        try writer.writeAll(self.cflag);
+    }
+};
+pub fn fmtCflag(cflag: []const u8, opt_sysroot: ?[]const u8) FmtCflag {
+    return .{ .cflag = cflag, .opt_sysroot = opt_sysroot };
+}
+
+const FmtLib = struct {
+    lib: []const u8,
+    opt_sysroot: ?[]const u8,
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = fmt;
+        _ = options;
+        if (self.opt_sysroot) |sysroot| {
+            if (std.mem.startsWith(u8, self.lib, "-L")) {
+                const path = self.lib[2..];
+                if (!std.mem.startsWith(u8, path, "/"))
+                    std.debug.panic("TODO: handle lib -L where the next character is not '/': '{s}'", .{self.lib});
+                try writer.print("-L{s}{s}", .{sysroot, path});
+                return;
+            }
+        }
+        try writer.writeAll(self.lib);
+    }
+};
+pub fn fmtLib(lib: []const u8, opt_sysroot: ?[]const u8) FmtLib {
+    return .{ .lib = lib, .opt_sysroot = opt_sysroot };
 }

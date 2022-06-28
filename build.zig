@@ -132,4 +132,6 @@ const test_cases = [_]TestCase{
     goodCase("-I/usr/include/bar-73.921 -Dlibbar_linux -I/usr/include/foo-1.2.3 -Dlibfoo_linux\n", "", &.{"--cflags", "bar"}, .{}),
     failCase("", "Requested 'foo > 1.2.3' but version of foo is 1.2.3\n", &.{"--cflags", "bar-needs-newer-foo"}, .{}),
     failCase("", "Requested 'foo > 1.2.3' but version of foo is 1.2.3\n", &.{"--cflags", "bar-needs-bar-newer-foo"}, .{}),
+
+    // TODO: test PKG_CONFIG_SYSROOT_DIR
 };
