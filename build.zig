@@ -9,6 +9,15 @@ pub fn build(b: *std.build.Builder) void {
     exe.setBuildMode(mode);
     exe.install();
 
+    const tar_cmd = b.addSystemCommand(&[_][]const u8 {
+        "tar",
+        "-C", b.install_prefix,
+        "-cvf", "pkg-config.tar",
+        ".",
+    });
+    tar_cmd.step.dependOn(b.getInstallStep());
+    b.step("tar", "create a tar archive of the pkg-config executable").dependOn(&tar_cmd.step);
+
     {
         const run_cmd = exe.run();
         run_cmd.step.dependOn(b.getInstallStep());

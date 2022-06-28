@@ -28,3 +28,17 @@ Some features I may want to add.
         : -I/usr/include/foo-1.2.3
 
 ```
+
+Create Release
+================================================================================
+```
+# example VERSION is 0.1
+git tag v$VERSION
+git push origin v$VERSION
+rm -f pkg-config.tar
+zig build tar
+mv pkg-config.tar pkg-config-$VERSION.tar
+xz pkg-config-$VERSION.tar
+```
+
+Then create a release and upload pkg-config-$VERSION.tar.xz to GitHub.
